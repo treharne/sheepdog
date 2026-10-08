@@ -12,6 +12,10 @@ The TUI draws navigation locally and uses `quosh-client` for the selected termin
 
 Organization snapshots exclude clients and process handles. Restoring creates ended Tabs, not runnable processes. Persistence encoding and atomic on-disk storage are not implemented yet.
 
+`sheepdog-runtime` now implements real Linux PTY ownership using pinned reusable `quosh-terminal`, `quosh-pty`, and `quosh-proto` libraries. A bounded actor serializes input, attachment changes, and geometry. Per-attachment sequence acceptance is separate from echo acknowledgment; partial writes retain their original attachment and sequence until completion. Settled checkpoints are published with immutable screen snapshots. Disconnect preserves the terminal; close bypasses input backpressure, terminates the process group, and escalates to SIGKILL if needed.
+
+The server must retain a `Terminal` handle independently of client views. Runtime commands are trusted in-process calls: this crate does not authenticate callers or expose a network listener. Disconnected attachments can be explicitly retired after all accepted input settles; retained attachment state is capped at 128 entries per terminal, and queued bytes plus barrier records at 1 MiB (with a separate bounded 32-command actor channel).
+
 ## Quosh integration findings
 
 Current Quosh `Session` combines a terminal process with a single attachment identity, input sequence, latest-screen stream, and transport epoch. `claim_transport()` replaces the existing transport; `Owner` orders input using one `last_seq` and publishes one `echo_ack`. Using this object unchanged would contradict Sheepdog's shared-client behavior.
@@ -25,14 +29,14 @@ The intended seam is a shared terminal owner plus independent attachment state:
 - Last interaction promotes geometry without replacing another client's attachment.
 - Client disconnect destroys neither the terminal owner nor the Tab. Confirmed close terminates the terminal process group.
 
-Foreign-client input can invalidate local prediction even with correct per-client acknowledgments. Before enabling shared prediction, investigate and test invalidation across streamed and datagram screen updates, reconnect replay, and geometry changes. Do not assume a shared screen plus independent sequence counters alone solves it. Any needed extension belongs in reusable Quosh libraries, not a private Sheepdog fork.
+Foreign-client input can invalidate local prediction even with correct per-client acknowledgments. The runtime publishes a per-attachment prediction epoch and eligibility: foreign input and geometry changes invalidate predictions, and eligibility stays false while multiple writers are attached or foreign accepted input remains unsettled. This is conservative runtime metadata, not a completed client prediction solution. Standard QS2 screens do not carry it; a network adapter must not enable prediction without implementing the metadata contract. Before enabling shared prediction, test invalidation across streamed and datagram updates, reconnect replay, and geometry changes. Any needed extension belongs in reusable Quosh libraries, not a private Sheepdog fork.
 
 The existing Quosh browser auth path also creates shell sessions. It needs a reusable authenticated-session boundary so Sheepdog can select its own terminals without creating unwanted shells.
 
 ## Milestones
 
 1. **Lifecycle model**: implemented with nine unit tests. Not a running server or client.
-2. **Terminal owner and attachment model**: real PTYs, bounded serialized input, per-attachment replay and causal echo barriers; shared-client tests before network wiring.
+2. **Terminal owner and attachment model**: implemented. Seven ledger tests and eleven real-PTY integration tests cover shared sequences, partial-write barriers, replay, stale epochs, output under input backpressure, geometry promotion, process-group shutdown, and final output. Together with the lifecycle model, 27 tests pass. Network wiring and client prediction are not implemented yet.
 3. **Quosh library integration and local Control Plane**: reusable terminal/auth seams, authenticated namespace, durable organization, terminal attach/select/close.
 4. **Remote macOS TUI**: SSH-assisted bootstrap, local navigation, Quosh terminal rendering and prediction, reconnection, scrollback/input behavior validated against Herdr.
 5. **Agent recognition and Attention**: pi, grok, agy, behavior fixtures derived from pinned Herdr reference and actual agent output.

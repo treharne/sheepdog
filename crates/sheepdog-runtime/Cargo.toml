@@ -1,0 +1,15 @@
+[package]
+name = "sheepdog-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheepdog-core = { path = "../sheepdog-core" }
+quosh-terminal = { git = "https://github.com/treharne/quosh", rev = "174aa25c4badb8322eca7f141295bd6e0cbde40a" }
+quosh-pty = { git = "https://github.com/treharne/quosh", rev = "174aa25c4badb8322eca7f141295bd6e0cbde40a" }
+quosh-proto = { git = "https://github.com/treharne/quosh", rev = "174aa25c4badb8322eca7f141295bd6e0cbde40a" }
+blit-remote = { git = "https://github.com/indent-com/blit", package = "blit-remote", rev = "7ec6085c54430f003fbafa7542613c46994c09c8" }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "sync", "time"] }
+libc = "0.2"
