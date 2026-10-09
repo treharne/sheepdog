@@ -138,11 +138,11 @@ impl Terminal {
             requested: AtomicBool::new(false),
             wake: Notify::new(),
         });
-        let process_group = ProcessGroup(child.id().expect("newly spawned child"));
+        let session = PtySession(child.id().expect("newly spawned child"));
         let owner = Owner {
             master,
             child,
-            process_group,
+            session,
             emulator,
             ledger: Ledger::default(),
             receive,
@@ -237,18 +237,18 @@ impl Terminal {
     }
 }
 
-struct ProcessGroup(u32);
+struct PtySession(u32);
 
-impl Drop for ProcessGroup {
+impl Drop for PtySession {
     fn drop(&mut self) {
-        signal_group(Some(self.0), libc::SIGKILL);
+        signal_session(Some(self.0), libc::SIGKILL);
     }
 }
 
 struct Owner {
     master: AsyncFd<File>,
     child: Child,
-    process_group: ProcessGroup,
+    session: PtySession,
     emulator: Emulator,
     ledger: Ledger,
     receive: mpsc::Receiver<OwnerCommand>,
@@ -359,7 +359,7 @@ impl Owner {
 
     async fn run(mut self) {
         let mut bytes = [0u8; 8192];
-        let pid = Some(self.process_group.0);
+        let pid = Some(self.session.0);
         let mut status = None;
         let result: Result<()> = async {
             loop {
@@ -408,11 +408,11 @@ impl Owner {
             Ok(())
         }.await;
         if status.is_none() {
-            signal_group(pid, libc::SIGTERM);
+            signal_session(pid, libc::SIGTERM);
             status = match tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await {
                 Ok(Ok(s)) => Some(s),
                 _ => {
-                    signal_group(pid, libc::SIGKILL);
+                    signal_session(pid, libc::SIGKILL);
                     let _ = self.child.start_kill();
                     tokio::time::timeout(Duration::from_millis(400), self.child.wait())
                         .await
@@ -421,8 +421,8 @@ impl Owner {
                 }
             };
         }
-        // Descendants must not outlive a terminal whose leader has exited.
-        signal_group(pid, libc::SIGKILL);
+        // Job-control groups in the owning session must not outlive its leader.
+        signal_session(pid, libc::SIGKILL);
         // Preserve the final available output even when wait() won the race.
         for _ in 0..256 {
             match self.master.get_ref().read(&mut bytes) {
@@ -462,10 +462,70 @@ fn set_nonblocking(file: &File) -> Result<()> {
     Ok(())
 }
 
-fn signal_group(pid: Option<u32>, signal: i32) {
-    if let Some(pid) = pid {
-        unsafe {
-            libc::kill(-(pid as i32), signal);
+fn process_group_session(stat: &[u8]) -> Option<(i32, i32)> {
+    // comm can contain spaces, parentheses, or non-UTF-8 bytes. Numeric fields
+    // start after the LAST closing parenthesis, not after a whitespace split.
+    let end = stat.iter().rposition(|b| *b == b')')?;
+    let fields = std::str::from_utf8(&stat[end + 1..]).ok()?;
+    let mut fields = fields.split_whitespace();
+    fields.next()?; // state
+    fields.next()?; // ppid
+    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+}
+
+fn signal_session(pid: Option<u32>, signal: i32) {
+    let Some(session) = pid.map(|pid| pid as i32) else {
+        return;
+    };
+    // Interactive shells place foreground/background jobs in different PGIDs.
+    // All remain in the PTY's new session unless deliberately detached with
+    // setsid(). Never signal another user's/session's unrelated process tree.
+    let mut groups = std::collections::BTreeSet::from([session]);
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Some(member) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some((group, sid)) = process_group_session(&stat) else {
+                continue;
+            };
+            if group <= 0 || sid != session || groups.contains(&group) {
+                continue;
+            }
+            // Recheck membership immediately before signaling. A proc entry may
+            // have exited or changed session while its stat record was read.
+            if unsafe { libc::getsid(member) } == session
+                && unsafe { libc::getpgid(member) } == group
+            {
+                unsafe {
+                    libc::kill(-group, signal);
+                }
+                groups.insert(group);
+            }
         }
+    }
+    unsafe {
+        libc::kill(-session, signal);
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    #[test]
+    fn proc_session_parser_handles_parentheses_and_non_utf8_comm() {
+        assert_eq!(
+            process_group_session(b"12 (has ) spaces \xff) S 1 55 44 0"),
+            Some((55, 44))
+        );
+        assert_eq!(process_group_session(b"broken"), None);
+        assert_eq!(process_group_session(b"12 (x) S 1 55"), None);
     }
 }

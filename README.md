@@ -7,7 +7,8 @@ Ubuntu server, macOS TUI first, then a PWA. GPL-3.0-only.
 
 The lifecycle model, real Linux terminal owner, and authenticated native
 network server are implemented, along with a portable native connection
-library. The user-facing TUI and PWA are not implemented yet.
+library. A local-rendered TUI prototype now works over real WebTransport;
+macOS acceptance, agent recognition/Attention, File Ingest, and PWA remain.
 
 `sheepdog-runtime` owns one PTY and emulator per terminal, with independent
 attachment epochs, input sequences, replay deduplication, causal echo barriers,
@@ -24,6 +25,7 @@ prediction invalidation in the reusable Quosh client.
 - [Implementation plan and integration findings](docs/02-implementation-plan.md)
 - [Native server, bootstrap helper, and wire](docs/03-native-server-and-wire.md)
 - [Native client adapter and remaining frontend work](docs/04-native-client-adapter.md)
+- [Native TUI prototype, controls, evidence, and gaps](docs/05-native-tui-prototype.md)
 - [Recorded interview decisions](docs/design-notes.md)
 - [Architectural decisions](docs/adr/)
 

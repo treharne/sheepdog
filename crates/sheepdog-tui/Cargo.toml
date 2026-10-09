@@ -1,0 +1,30 @@
+[package]
+name = "sheepdog-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sheepdog"
+path = "src/main.rs"
+
+[dependencies]
+sheepdog-core = { path = "../sheepdog-core" }
+sheepdog-proto = { path = "../sheepdog-proto" }
+sheepdog-client = { path = "../sheepdog-client" }
+quosh-proto = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+blit-remote = { git = "https://github.com/indent-com/blit", package = "blit-remote", rev = "7ec6085c54430f003fbafa7542613c46994c09c8" }
+anyhow = "1"
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+sheepdog-server = { path = "../sheepdog-server" }
+quosh-pty = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+quosh-terminal = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+serde_json = "1"

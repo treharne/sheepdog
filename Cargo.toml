@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sheepdog-core", "crates/sheepdog-runtime", "crates/sheepdog-server", "crates/sheepdog-proto", "crates/sheepdog-client"]
+members = ["crates/sheepdog-core", "crates/sheepdog-runtime", "crates/sheepdog-server", "crates/sheepdog-proto", "crates/sheepdog-client", "crates/sheepdog-tui"]
 
 [workspace.package]
 version = "0.1.0"

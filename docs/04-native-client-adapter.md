@@ -1,6 +1,6 @@
 # Native client adapter
 
-`sheepdog-client` is a platform-independent native connection library for the forthcoming macOS TUI. It depends on the pure model/protocol, Quosh client/protocol, and WebTransport, not on Linux PTY/runtime/server crates. Tested on Linux; no macOS acceptance test or TUI exists yet.
+`sheepdog-client` is a platform-independent native connection library for the forthcoming macOS TUI. It depends on the pure model/protocol, Quosh client/protocol, and WebTransport, not on Linux PTY/runtime/server crates. Tested on Linux; no macOS acceptance test yet. The [native TUI prototype](05-native-tui-prototype.md) now consumes this adapter.
 
 ## Bootstrap
 
@@ -38,4 +38,4 @@ Actual pinned WebTransport and PTYs cover pause/resume without duplicate or lost
 
 Deliberately faulty authenticated peers verify fatal malformed framing and recovery after cancellation during a partial RPC reply. Separate subprocess tests verify SSH quoting/target validation, bounded stdout, and helper deadlines.
 
-Outstanding: user-facing TUI/CLI, Herdr-style navigation/pickers/keybindings and rendering, macOS verification, Control Plane event subscriptions, terminal history/copy mode, clipboard/File Ingest, and agent recognition/Attention. The SSH invocation has not yet been exercised against an external SSH host by this adapter.
+A user-facing TUI/CLI prototype now implements basic local navigation/pickers/keybindings and rendering. Outstanding: full Herdr parity, macOS verification, Control Plane event subscriptions, terminal history/copy mode, clipboard/File Ingest, and agent recognition/Attention. The SSH invocation has not yet been exercised against an external SSH host by this adapter.
