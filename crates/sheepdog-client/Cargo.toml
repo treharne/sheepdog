@@ -1,0 +1,18 @@
+[package]
+name = "sheepdog-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheepdog-core = { path = "../sheepdog-core" }
+sheepdog-proto = { path = "../sheepdog-proto" }
+quosh-client = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+quosh-proto = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "sync", "time", "io-util"] }
+wtransport = { version = "0.6", features = ["quinn"] }
+url = "2"
+shlex = "1"
+blit-remote = { git = "https://github.com/indent-com/blit", package = "blit-remote", rev = "7ec6085c54430f003fbafa7542613c46994c09c8" }
