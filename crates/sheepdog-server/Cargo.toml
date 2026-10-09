@@ -1,0 +1,25 @@
+[package]
+name = "sheepdog-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheepdog-core = { path = "../sheepdog-core" }
+sheepdog-proto = { path = "../sheepdog-proto" }
+sheepdog-runtime = { path = "../sheepdog-runtime" }
+quosh-proto = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+quosh-trust = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+wtransport = "0.6"
+rand = "0.9"
+sha2 = "0.10"
+subtle = "2"
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+quosh-client = { git = "https://github.com/treharne/quosh", rev = "e1a0346ebd34727851ac801eee7e4805c5ec99b6" }

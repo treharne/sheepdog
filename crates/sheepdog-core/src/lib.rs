@@ -2,26 +2,27 @@
 //! Runtime adapters execute launch/stop requests; client disconnection never
 //! emits a stop request. Snapshots contain organization, never live processes.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SpaceId(pub u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TabId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClientId(pub u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TerminalId(pub u64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EndReason {
     ServerRestart,
     Exited(i32),
     LaunchFailed(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalState {
     Starting(TerminalId),
     Running(TerminalId),
@@ -37,14 +38,14 @@ impl TerminalState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Space {
     pub id: SpaceId,
     pub name: String,
     pub default_directory: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
     pub id: TabId,
     pub space: SpaceId,
@@ -54,7 +55,7 @@ pub struct Tab {
     pub geometry: Geometry,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Geometry {
     pub cols: u16,
     pub rows: u16,
@@ -77,7 +78,7 @@ pub struct Launch {
     pub geometry: Geometry,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedTab {
     pub id: TabId,
     pub space: SpaceId,
@@ -85,7 +86,7 @@ pub struct SavedTab {
     pub directory: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Organization {
     pub spaces: Vec<Space>,
     pub tabs: Vec<SavedTab>,
@@ -102,13 +103,13 @@ pub enum Error {
     IdExhausted,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Client {
     selected: Option<TabId>,
     geometry: Geometry,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Server {
     spaces: BTreeMap<SpaceId, Space>,
     tabs: BTreeMap<TabId, Tab>,
@@ -219,6 +220,25 @@ impl Server {
         }
         tab.terminal = TerminalState::Ended(reason);
         true
+    }
+
+    /// Reconcile an authoritative owner update without changing any client's
+    /// independently remembered viewport. Stale terminal generations are ignored.
+    pub fn terminal_geometry(
+        &mut self,
+        id: TabId,
+        terminal: TerminalId,
+        geometry: Geometry,
+    ) -> Result<bool, Error> {
+        Geometry::new(geometry.cols, geometry.rows)?;
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return Ok(false);
+        };
+        if tab.terminal.live_id() != Some(terminal) {
+            return Ok(false);
+        }
+        tab.geometry = geometry;
+        Ok(true)
     }
 
     pub fn connect(&mut self, geometry: Geometry) -> Result<ClientId, Error> {
@@ -480,6 +500,27 @@ mod tests {
             Server::restore(saved, size()),
             Err(Error::InvalidSnapshot)
         ));
+    }
+
+    #[test]
+    fn owner_geometry_does_not_replace_client_viewport_or_accept_stale_generation() {
+        let (mut server, _, launch) = setup();
+        let client = server.connect(size()).unwrap();
+        server.select(client, launch.tab).unwrap();
+        let small = Geometry::new(40, 12).unwrap();
+        assert_eq!(
+            server.terminal_geometry(launch.tab, launch.terminal, small),
+            Ok(true)
+        );
+        assert_eq!(server.tab(launch.tab).unwrap().geometry, small);
+        server.interact(client).unwrap();
+        assert_eq!(server.tab(launch.tab).unwrap().geometry, size());
+        server.ended(launch.tab, launch.terminal, EndReason::Exited(0));
+        server.reopen_tab(launch.tab).unwrap();
+        assert_eq!(
+            server.terminal_geometry(launch.tab, launch.terminal, small),
+            Ok(false)
+        );
     }
 
     #[test]

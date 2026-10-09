@@ -1,0 +1,3 @@
+# Separate client authority from persistent terminal ownership
+
+The native connection uses an SSH-authenticated local bootstrap to issue a client capability for the server's Unix user; the Control Plane exchanges that authority for independently resumable terminal-view tickets over pinned WebTransport. Terminal-view disconnect or replacement never destroys the server-owned Tab, and prediction invalidation travels atomically with each receiving view's screen and echo acknowledgment. Rather than treating one Quosh shell session as the whole Sheepdog client, this boundary preserves independent navigation, shared terminal input, and a reusable protocol for the later PWA.

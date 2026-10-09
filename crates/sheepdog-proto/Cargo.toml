@@ -1,0 +1,9 @@
+[package]
+name = "sheepdog-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sheepdog-core = { path = "../sheepdog-core" }
+serde = { version = "1", features = ["derive"] }
