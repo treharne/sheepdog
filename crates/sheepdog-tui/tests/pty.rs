@@ -208,6 +208,14 @@ impl Gui {
             tokio::time::sleep(Duration::from_millis(3)).await;
         }
     }
+    async fn click(&mut self, x: u16, y: u16) {
+        self.master
+            .write_all(
+                format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1).as_bytes(),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     async fn paste(&mut self, text: &[u8]) {
         // A terminal sends each CSI delimiter atomically. Delaying between
         // ESC and '[' models standalone Escape keypresses, not a paste.
@@ -269,7 +277,11 @@ async fn real_tui_navigates_without_destroying_work_and_quit_restores_local_tty(
     gui.keys(b"printf '\\124\\125\\111\\137\\117\\116\\105\\n'\r")
         .await;
     gui.wait("TUI_ONE").await;
-    gui.master.write_all(b"\x1b[<0;11;2M\x1b[<0;11;2m").unwrap();
+    assert!(
+        gui.text().contains("Spaces") && gui.text().contains("Terminals / Agents"),
+        "multi-row terminal output must not overwrite the sidebar"
+    );
+    gui.click(35, 0).await;
     gui.wait("[2:TWO]").await;
     gui.wait("Connected").await;
     gui.keys(b"printf '\\124\\125\\111\\137\\124\\127\\117\\n'\r")
@@ -360,22 +372,54 @@ async fn restored_tabs_explain_restart_and_require_explicit_new_shell() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_server_space_dialog_and_explicit_literal_paste_work_end_to_end() {
+async fn fresh_server_starts_a_shell_and_mouse_creates_and_renames_work_without_a_wizard() {
     let harness = Harness::new().await;
     let mut gui = harness.gui();
-    gui.wait("creates a Space").await;
-    gui.prefix(b'N').await;
-    gui.wait("New Space — name").await;
-    gui.keys("草原\r".as_bytes()).await;
-    gui.wait("remote absolute directory").await;
-    gui.keys(b"/tmp\r").await;
-    gui.wait("Empty Space").await;
-    assert!(
-        harness.tabs().await.is_empty(),
-        "creating organization never automatically starts a shell"
-    );
-    gui.prefix(b'c').await;
     gui.wait("[1:Shell]").await;
+    gui.wait("Connected").await;
+    assert_eq!(
+        harness.tabs().await.len(),
+        1,
+        "fresh startup opens a shell without any keys or wizard"
+    );
+    gui.keys(b"printf '\\106\\111\\122\\123\\124\\137\\123\\110\\105\\114\\114\\n'\r")
+        .await;
+    gui.wait("FIRST_SHELL").await;
+    // Sidebar + New Space is row 11 at 80x24. Top-bar + is at column 76.
+    gui.click(2, 11).await;
+    gui.wait("Connected").await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while harness.tabs().await.len() != 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gui.text().matches("/ Shell").count() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new Space must be painted before acting on its Tab bar");
+    gui.wait("[1:Shell]").await;
+    gui.wait("Connected").await;
+    gui.click(77, 0).await;
+    gui.wait("[2:Shell]").await;
+    gui.wait("Connected").await;
+    assert_eq!(harness.tabs().await.len(), 3);
+    gui.prefix(b'r').await;
+    gui.wait("Rename Space").await;
+    gui.keys(b"\x01\x0b").await;
+    gui.keys("草原\r".as_bytes()).await;
+    gui.wait("草原").await;
+    gui.prefix(b',').await;
+    gui.wait("Rename Tab").await;
+    gui.keys(b"\x01\x0bTail\r").await;
+    gui.wait("[2:Tail]").await;
+    // Mouse-only Space switching returns the independently retained first shell.
+    gui.click(2, 1).await;
+    gui.wait("FIRST_SHELL").await;
     gui.wait("Connected").await;
     gui.paste(b"echo NOT_INGESTED\n").await;
     gui.wait("File Ingest not built").await;
@@ -388,10 +432,13 @@ async fn empty_server_space_dialog_and_explicit_literal_paste_work_end_to_end() 
     gui.wait("File Ingest not built").await;
     assert!(!gui.text().contains("STILL_GATED"));
     gui.quit().await;
-    assert!(matches!(
-        harness.tabs().await[0].terminal,
-        TerminalState::Running(_)
-    ));
+    assert!(
+        harness
+            .tabs()
+            .await
+            .iter()
+            .all(|t| matches!(t.terminal, TerminalState::Running(_)))
+    );
     harness.close().await;
 }
 

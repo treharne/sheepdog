@@ -148,6 +148,15 @@ impl Server {
         Ok(id)
     }
 
+    pub fn rename_space(&mut self, id: SpaceId, name: String) -> Result<(), Error> {
+        self.spaces.get_mut(&id).ok_or(Error::MissingSpace)?.name = name;
+        Ok(())
+    }
+    pub fn rename_tab(&mut self, id: TabId, label: String) -> Result<(), Error> {
+        self.tabs.get_mut(&id).ok_or(Error::MissingTab)?.label = label;
+        Ok(())
+    }
+
     pub fn create_tab(
         &mut self,
         space: SpaceId,

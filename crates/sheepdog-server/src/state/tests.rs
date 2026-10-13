@@ -1,4 +1,5 @@
 use super::*;
+mod defaults;
 
 fn state(shell: &str) -> (Arc<State>, PathBuf) {
     let directory = std::env::temp_dir().join(format!("sheepdog-state-{}", rand::random::<u64>()));

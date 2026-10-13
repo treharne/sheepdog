@@ -5,12 +5,19 @@ use crate::protocol::{Bootstrap, Request, Response, Ticket, VERSION};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+fn validate_label(label: &str) -> Result<()> {
+    if label.trim().is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+        bail!("invalid name");
+    }
+    Ok(())
+}
+
 fn credential_key(token: [u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
 }
 use anyhow::{Context, Result, bail};
 use sheepdog_core::{
-    ClientId, EndReason, Geometry, Organization, Server, TerminalId, TerminalState,
+    ClientId, EndReason, Geometry, Organization, Server, SpaceId, TerminalId, TerminalState,
 };
 use sheepdog_runtime::{Connection, Program, Terminal};
 use std::collections::BTreeMap;
@@ -226,6 +233,59 @@ impl State {
                 tabs: inner.model.tabs().cloned().collect(),
                 selected: domain(inner.model.selected(client))?,
             }),
+            Request::EnsureDefault { geometry }
+            | Request::CreateWorkspace {
+                source: None,
+                geometry,
+            } => {
+                let ensure = matches!(request, Request::EnsureDefault { .. });
+                if ensure && inner.model.tabs().next().is_some() {
+                    return Ok(Response::Closed);
+                }
+                let existing = if ensure {
+                    inner.model.spaces().next().cloned()
+                } else {
+                    None
+                };
+                let directory = existing
+                    .as_ref()
+                    .map(|s| s.default_directory.clone())
+                    .unwrap_or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| "/".into())
+                    });
+                self.create_workspace(&mut inner, existing.map(|s| s.id), directory, geometry)
+            }
+            Request::CreateWorkspace {
+                source: Some(source),
+                geometry,
+            } => {
+                let directory = inner
+                    .model
+                    .spaces()
+                    .find(|s| s.id == source)
+                    .context("unknown source Space")?
+                    .default_directory
+                    .clone();
+                self.create_workspace(&mut inner, None, directory, geometry)
+            }
+            Request::RenameSpace { space, name } => {
+                validate_label(&name)?;
+                let mut staged = inner.model.clone();
+                domain(staged.rename_space(space, name))?;
+                self.save(&staged)?;
+                inner.model = staged;
+                Ok(Response::Closed)
+            }
+            Request::RenameTab { tab, label } => {
+                validate_label(&label)?;
+                let mut staged = inner.model.clone();
+                domain(staged.rename_tab(tab, label))?;
+                self.save(&staged)?;
+                inner.model = staged;
+                Ok(Response::Closed)
+            }
             Request::CreateSpace { name, directory } => {
                 if name.is_empty()
                     || name.len() > 128
@@ -351,6 +411,43 @@ impl State {
                 Ok(Response::Closed)
             }
         }
+    }
+
+    fn create_workspace(
+        &self,
+        inner: &mut Inner,
+        existing: Option<SpaceId>,
+        directory: std::path::PathBuf,
+        geometry: Geometry,
+    ) -> Result<Response> {
+        domain(Geometry::new(geometry.cols, geometry.rows))?;
+        if inner.model.tabs().count() >= MAX_TABS
+            || (existing.is_none() && inner.model.spaces().count() >= MAX_SPACES)
+        {
+            bail!("organization limit reached");
+        }
+        if !directory.is_absolute() || !directory.is_dir() {
+            bail!("invalid default directory");
+        }
+        let mut staged = inner.model.clone();
+        let space = match existing {
+            Some(id) => id,
+            None => {
+                let name = directory
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|n| !n.is_empty() && n.len() <= 128 && !n.chars().any(char::is_control))
+                    .unwrap_or("Space")
+                    .to_owned();
+                domain(staged.create_space(name, directory))?
+            }
+        };
+        let launch = domain(staged.create_tab(space, "Shell".into(), geometry))?;
+        // One durable transaction under the owner lock: concurrent first clients
+        // cannot create duplicate starter work. Save before spawning any process.
+        self.save(&staged)?;
+        inner.model = staged;
+        self.launch(inner, launch)
     }
 
     fn launch(&self, inner: &mut Inner, launch: sheepdog_core::Launch) -> Result<Response> {

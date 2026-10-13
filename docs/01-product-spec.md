@@ -12,6 +12,8 @@ First deliver an Ubuntu server and macOS TUI client. A PWA client follows. Licen
 
 - One terminal is visible at a time. Tabs select terminals; Spaces group Tabs.
 - Each Space has a name and default remote working directory. New Tabs start shells there; existing terminals may change directory independently.
+- Opening a fresh/Tab-empty server goes directly into a default-named Space with a shell; no naming/directory wizard. New Spaces also start with a shell and automatic names; naming is optional afterward. This does not reopen restored ended Tabs.
+- Desktop layout follows Herdr: clickable left Spaces/Agents sidebar and a thin top tab selector, with mouse creation controls. Prefix commands are alternatives, not prerequisites for normal startup.
 - Follow Herdr for navigation, keybindings, agent-state behavior, and Attention. Reference: `reference/herdr` at `4dc23bb15d4a2fd2c093abfb509f903c3015bf56`.
 - Operators launch agents normally inside terminals. Recognize pi, grok, and agy in the initial release.
 - Attention appears inside connected clients only.

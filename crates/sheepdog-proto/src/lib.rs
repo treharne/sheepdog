@@ -31,6 +31,23 @@ pub struct AuthOk {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Snapshot,
+    /// Atomically create starter work only when no Tabs exist. Never reopens ended work.
+    EnsureDefault {
+        geometry: Geometry,
+    },
+    /// Default-named Space with a shell, using the source Space's directory or HOME.
+    CreateWorkspace {
+        source: Option<SpaceId>,
+        geometry: Geometry,
+    },
+    RenameSpace {
+        space: SpaceId,
+        name: String,
+    },
+    RenameTab {
+        tab: TabId,
+        label: String,
+    },
     /// Explicit client quit revokes this capability, not the server's work.
     Disconnect,
     CreateSpace {

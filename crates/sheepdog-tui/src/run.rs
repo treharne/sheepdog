@@ -43,10 +43,28 @@ async fn perform(
 ) -> Result<Change> {
     let attach = !matches!(
         action,
-        Action::Refresh | Action::CloseTab(_) | Action::CloseSpace(_) | Action::NewSpace(..)
+        Action::Refresh
+            | Action::EnsureDefault
+            | Action::CloseTab(_)
+            | Action::CloseSpace(_)
+            | Action::RenameSpace(..)
+            | Action::RenameTab(..)
     );
     match action {
         Action::Refresh => {}
+        Action::EnsureDefault => {
+            client.request(Request::EnsureDefault { geometry }).await?;
+        }
+        Action::RenameSpace(id, name) => {
+            client
+                .request(Request::RenameSpace { space: id, name })
+                .await?;
+        }
+        Action::RenameTab(id, label) => {
+            client
+                .request(Request::RenameTab { tab: id, label })
+                .await?;
+        }
         Action::Select(tab) => selected = Some(tab),
         Action::NewTab(id) => {
             let Response::Tab(tab) = client
@@ -62,18 +80,15 @@ async fn perform(
             selected = Some(tab.id);
             space = Some(id);
         }
-        Action::NewSpace(name, directory) => {
-            let Response::Space(s) = client
-                .request(Request::CreateSpace {
-                    name,
-                    directory: directory.into(),
-                })
+        Action::NewSpace(source) => {
+            let Response::Tab(tab) = client
+                .request(Request::CreateWorkspace { source, geometry })
                 .await?
             else {
-                bail!("expected Space");
+                bail!("expected starter Tab");
             };
-            space = Some(s.id);
-            selected = None;
+            space = Some(tab.space);
+            selected = Some(tab.id);
         }
         Action::CloseTab(tab) => {
             client
@@ -147,7 +162,7 @@ fn same(a: &Option<ViewSnapshot>, b: &Option<ViewSnapshot>) -> bool {
         _ => false,
     }
 }
-fn mouse(app: &mut App, host: &str, event: crossterm::event::MouseEvent) -> Effect {
+fn mouse(app: &mut App, _host: &str, event: crossterm::event::MouseEvent) -> Effect {
     if event.column >= app.width || event.row >= app.height {
         return Effect::None;
     }
@@ -159,15 +174,15 @@ fn mouse(app: &mut App, host: &str, event: crossterm::event::MouseEvent) -> Effe
     }) = &mut app.modal
     {
         let choices = filtered(choices, &filter.text);
-        let count = app.height.saturating_sub(5) as usize;
+        let count = app.height.saturating_sub(3) as usize;
         match event.kind {
             MouseEventKind::ScrollUp => *cursor = cursor.saturating_sub(3),
             MouseEventKind::ScrollDown => {
                 *cursor = (*cursor + 3).min(choices.len().saturating_sub(1))
             }
-            MouseEventKind::Down(MouseButton::Left) if event.row >= 4 => {
+            MouseEventKind::Down(MouseButton::Left) if event.row >= 3 => {
                 let start = cursor.saturating_sub(count.saturating_sub(1));
-                let i = start + (event.row - 4) as usize;
+                let i = start + (event.row - 3) as usize;
                 if i < choices.len() && event.row < app.height - 1 {
                     *cursor = i;
                     return app.key(crossterm::event::KeyEvent::new(
@@ -180,72 +195,75 @@ fn mouse(app: &mut App, host: &str, event: crossterm::event::MouseEvent) -> Effe
         }
         return Effect::None;
     }
-    if app.modal.is_some() || app.busy {
+    if app.modal.is_some() {
         return Effect::None;
     }
-    if event.kind == MouseEventKind::Down(MouseButton::Left) && event.row == 0 {
-        let mut x = unicode_width::UnicodeWidthStr::width(
-            paint::clean(&format!("Sheepdog {host}  "), usize::MAX).as_str(),
-        );
-        let choices: Vec<_> = app
-            .spaces
-            .iter()
-            .map(|s| {
-                (
-                    s.id,
-                    unicode_width::UnicodeWidthStr::width(
-                        paint::clean(&s.name, usize::MAX).as_str(),
-                    ) + if Some(s.id) == app.space { 2 } else { 0 },
-                )
-            })
-            .collect();
-        for (id, width) in choices {
-            if event.column as usize >= x && (event.column as usize) < x + width {
-                app.space = Some(id);
-                app.selected = app.tabs.iter().find(|t| t.space == id).map(|t| t.id);
-                return app.selected.map_or(Effect::None, |tab| app.choose(tab));
-            }
-            x += width + 3;
+    if app.busy {
+        if matches!(event.kind, MouseEventKind::Down(_)) {
+            app.notice = "Control operation pending; click again when ready".into();
         }
+        return Effect::None;
     }
-    if event.kind == MouseEventKind::Down(MouseButton::Left) && event.row == 1 {
-        let mut x = 0;
-        let tabs: Vec<_> = app
-            .tabs
-            .iter()
-            .filter(|t| Some(t.space) == app.space)
-            .collect();
-        for (i, tab) in tabs.iter().enumerate() {
-            let text = format!(
-                "{}:{}{}",
-                i + 1,
-                tab.label,
-                if matches!(tab.terminal, TerminalState::Ended(_)) {
-                    " (ended)"
-                } else {
-                    ""
+    let target = crate::layout::compute(app)
+        .entries
+        .iter()
+        .find(|e| e.rect.contains(event.column, event.row))
+        .and_then(|e| e.target);
+    use crate::layout::Target;
+    if event.kind == MouseEventKind::Down(MouseButton::Right) {
+        match target {
+            Some(Target::Space(id)) => {
+                if let Some(s) = app.spaces.iter().find(|s| s.id == id) {
+                    let mut f = crate::input::Field::default();
+                    f.insert(&s.name);
+                    app.modal = Some(Modal::Rename(crate::app::RenameTarget::Space(id), f));
                 }
-            );
-            let width =
-                unicode_width::UnicodeWidthStr::width(paint::clean(&text, usize::MAX).as_str())
-                    + if Some(tab.id) == app.selected { 2 } else { 0 };
-            if (event.column as usize) >= x && (event.column as usize) < x + width {
-                let id = tab.id;
-                return app.choose(id);
             }
-            x += width + 3;
+            Some(Target::Tab(id)) => {
+                if let Some(t) = app.tabs.iter().find(|t| t.id == id) {
+                    let mut f = crate::input::Field::default();
+                    f.insert(&t.label);
+                    app.modal = Some(Modal::Rename(crate::app::RenameTarget::Tab(id), f));
+                }
+            }
+            _ => {}
         }
+        return Effect::None;
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Left) {
+        return match target {
+            Some(Target::Space(id)) => app.choose_space(id),
+            Some(Target::Tab(id)) => app.choose(id),
+            Some(Target::NewSpace) => Effect::Work(Action::NewSpace(app.space)),
+            Some(Target::NewTab) => app
+                .space
+                .map_or(Effect::Work(Action::NewSpace(None)), |space| {
+                    Effect::Work(Action::NewTab(space))
+                }),
+            None => Effect::None,
+        };
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Middle)
+        && let Some(Target::Tab(id)) = target
+        && let Some(t) = app.tabs.iter().find(|t| t.id == id)
+    {
+        app.modal = Some(Modal::ConfirmTab(id, t.label.clone()));
     }
     Effect::None
 }
 
 /// Local navigation/UI only. No Sheepdog TUI is launched in a remote shell.
 pub async fn run(client: Arc<Client>, host: &str, never: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "Sheepdog requires a local interactive terminal"
+    );
     let size = crossterm::terminal::size()?;
     let mut app = App::new(size.0, size.1);
     let initial = perform(
         client.clone(),
-        Action::Refresh,
+        Action::EnsureDefault,
         app.geometry(),
         never,
         None,
@@ -285,10 +303,13 @@ async fn ui(client: &Arc<Client>, host: &str, never: bool, app: &mut App) -> Res
     };
     loop {
         if let Some(action) = next.take() {
-            let selection = !matches!(action, Action::Refresh);
+            let selection = !matches!(
+                action,
+                Action::Refresh | Action::RenameSpace(..) | Action::RenameTab(..)
+            );
             selecting = matches!(
                 action,
-                Action::Select(_) | Action::NewTab(_) | Action::Reopen(_)
+                Action::Select(_) | Action::NewTab(_) | Action::NewSpace(_) | Action::Reopen(_)
             );
             if selection {
                 for (_, v) in views.values() {
@@ -360,7 +381,9 @@ async fn ui(client: &Arc<Client>, host: &str, never: bool, app: &mut App) -> Res
                         Effect::None
                     }
                     Event::Mouse(event) => {
-                        if event.row >= 2
+                        if crate::layout::compute(app)
+                            .body
+                            .contains(event.column, event.row)
                             && app.modal.is_none()
                             && app.live()
                             && let Some((_, v)) = app.selected.and_then(|id| views.get(&id))
@@ -374,9 +397,7 @@ async fn ui(client: &Arc<Client>, host: &str, never: bool, app: &mut App) -> Res
                         if literal {
                             app.notice.clear();
                         }
-                        if let Some(Modal::Name(field) | Modal::Directory(_, field)) =
-                            &mut app.modal
-                        {
+                        if let Some(Modal::Rename(_, field)) = &mut app.modal {
                             field.insert(&text);
                             Effect::None
                         } else if !literal {

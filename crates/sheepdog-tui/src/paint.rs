@@ -1,5 +1,6 @@
-use crate::app::{App, Modal, filtered};
+use crate::app::{App, Modal, RenameTarget, filtered};
 use crate::input::Field;
+use crate::layout::{self, Rect};
 use blit_remote::FrameState;
 use sheepdog_client::ViewSnapshot;
 use sheepdog_core::{EndReason, TerminalState};
@@ -7,8 +8,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub fn clean(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
     let safe: String = text
         .chars()
         .filter(|c| {
@@ -17,20 +16,22 @@ pub fn clean(text: &str, width: usize) -> String {
                 && !('\u{2066}'..='\u{2069}').contains(c)
         })
         .collect();
-    for grapheme in safe.graphemes(true) {
-        let n = grapheme.width();
+    let mut out = String::new();
+    let mut used = 0;
+    for g in safe.graphemes(true) {
+        let n = g.width();
         if used + n > width {
             break;
         }
         used += n;
-        out.push_str(grapheme);
+        out.push_str(g);
     }
     out
 }
-fn field_window(field: &Field, width: u16) -> (String, usize) {
-    let mut start = field.cursor;
+fn field_window(f: &Field, width: u16) -> (String, usize) {
+    let mut start = f.cursor;
     let mut x = 0;
-    for (i, g) in field.text[..field.cursor].grapheme_indices(true).rev() {
+    for (i, g) in f.text[..f.cursor].grapheme_indices(true).rev() {
         let n = clean(g, usize::MAX).width();
         if x + n > width.saturating_sub(1) as usize {
             break;
@@ -38,23 +39,42 @@ fn field_window(field: &Field, width: u16) -> (String, usize) {
         start = i;
         x += n;
     }
-    (clean(&field.text[start..], width as usize), x)
+    (clean(&f.text[start..], width as usize), x)
 }
-fn line(out: &mut Vec<u8>, row: u16, text: &str, width: u16) {
+fn line(out: &mut Vec<u8>, rect: Rect, text: &str, active: bool) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
     out.extend_from_slice(
-        format!("\x1b[{};1H\x1b[0m{}", row + 1, clean(text, width as usize)).as_bytes(),
+        format!(
+            "\x1b[{};{}H\x1b[0m{}",
+            rect.y + 1,
+            rect.x + 1,
+            if active { "\x1b[7m" } else { "" }
+        )
+        .as_bytes(),
     );
+    let text = clean(text, rect.width as usize);
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(
+        " ".repeat((rect.width as usize).saturating_sub(text.width()))
+            .as_bytes(),
+    );
+    out.extend_from_slice(b"\x1b[0m");
 }
 pub fn crop(frame: &FrameState, rows: u16, cols: u16) -> FrameState {
     let rows = rows.min(frame.rows());
     let cols = cols.min(frame.cols());
-    let size = 12;
-    let mut cells = Vec::with_capacity(rows as usize * cols as usize * size);
+    assert!(
+        rows > 0 && cols > 0,
+        "terminal crops require positive dimensions"
+    );
+    let mut cells = Vec::with_capacity(rows as usize * cols as usize * 12);
     for row in 0..rows {
-        let start = row as usize * frame.cols() as usize * size;
-        cells.extend_from_slice(&frame.cells()[start..start + cols as usize * size]);
-        if cols < frame.cols() && frame.cells()[start + cols as usize * size + 1] & 2 != 0 {
-            let last = cells.len() - size;
+        let start = row as usize * frame.cols() as usize * 12;
+        cells.extend_from_slice(&frame.cells()[start..start + cols as usize * 12]);
+        if cols < frame.cols() && frame.cells()[start + cols as usize * 12 + 1] & 2 != 0 {
+            let last = cells.len() - 12;
             cells[last + 1] = (cells[last + 1] & !0x3a) | 8;
             cells[last + 8..last + 12].copy_from_slice(b" \0\0\0");
         }
@@ -73,7 +93,7 @@ pub fn crop(frame: &FrameState, rows: u16, cols: u16) -> FrameState {
         let col = idx % frame.cols() as usize;
         if row < rows as usize
             && col < cols as usize
-            && clipped.cells()[(row * cols as usize + col) * size + 1] >> 3 & 7 == 7
+            && clipped.cells()[(row * cols as usize + col) * 12 + 1] >> 3 & 7 == 7
         {
             clipped
                 .overflow_mut()
@@ -82,88 +102,117 @@ pub fn crop(frame: &FrameState, rows: u16, cols: u16) -> FrameState {
     }
     clipped
 }
+fn terminal(out: &mut Vec<u8>, frame: &FrameState, body: Rect, live: bool) {
+    let cursor_visible = live
+        && frame.mode() & quosh_proto::MODE_CURSOR_VISIBLE != 0
+        && frame.cursor_row() < body.height.min(300)
+        && frame.cursor_col() < body.width.min(500);
+    let frame = crop(frame, body.height.min(300), body.width.min(500));
+    // frame_ansi's CRLF resets the physical column to 1. Render independent
+    // rows at the body origin so terminal output can never overwrite sidebar.
+    for row in 0..frame.rows() {
+        let start = row as usize * frame.cols() as usize * 12;
+        let mut one = FrameState::from_parts(
+            1,
+            frame.cols(),
+            0,
+            0,
+            frame.mode(),
+            "",
+            frame.cells()[start..start + frame.cols() as usize * 12].to_vec(),
+        );
+        for (&idx, text) in frame.overflow() {
+            if idx / frame.cols() as usize == row as usize {
+                one.overflow_mut()
+                    .insert(idx % frame.cols() as usize, text.clone());
+            }
+        }
+        out.extend_from_slice(format!("\x1b[{};{}H", body.y + row + 1, body.x + 1).as_bytes());
+        out.extend_from_slice(&quosh_proto::frame_ansi(&one));
+    }
+    if cursor_visible {
+        out.extend_from_slice(
+            format!(
+                "\x1b[{};{}H\x1b[?25h",
+                body.y + frame.cursor_row() + 1,
+                body.x + frame.cursor_col() + 1
+            )
+            .as_bytes(),
+        );
+    }
+}
 pub fn render(app: &App, host: &str, view: Option<&ViewSnapshot>) -> Vec<u8> {
     let mut out = b"\x1b[?2026h\x1b[?25l\x1b[?7l\x1b[0m\x1b[H\x1b[2J".to_vec();
     if !app.usable() {
-        line(&mut out, 0, "Resize terminal to at least 12×5", app.width);
+        line(
+            &mut out,
+            Rect {
+                x: 0,
+                y: 0,
+                width: app.width,
+                height: 1,
+            },
+            "Resize terminal to at least 12×5",
+            false,
+        );
         out.extend_from_slice(b"\x1b[?7h\x1b[?2026l");
         return out;
     }
-    let spaces = app
-        .spaces
-        .iter()
-        .map(|s| {
-            if Some(s.id) == app.space {
-                format!("[{}]", s.name)
-            } else {
-                s.name.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    line(
-        &mut out,
-        0,
-        &format!("Sheepdog {host}  {spaces}"),
-        app.width,
-    );
-    let tabs = app
-        .tabs
-        .iter()
-        .filter(|t| Some(t.space) == app.space)
-        .enumerate()
-        .map(|(i, t)| {
-            let name = format!(
-                "{}:{}{}",
-                i + 1,
-                t.label,
-                if matches!(t.terminal, TerminalState::Ended(_)) {
-                    " (ended)"
-                } else {
-                    ""
-                }
+    let layout = layout::compute(app);
+    let body = layout.body;
+    for e in &layout.entries {
+        line(&mut out, e.rect, &e.text, e.active);
+    }
+    if layout.sidebar > 0 {
+        for y in 0..app.height {
+            line(
+                &mut out,
+                Rect {
+                    x: layout.sidebar - 1,
+                    y,
+                    width: 1,
+                    height: 1,
+                },
+                "│",
+                false,
             );
-            if Some(t.id) == app.selected {
-                format!("[{name}]")
-            } else {
-                name
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    line(&mut out, 1, &tabs, app.width);
-    let geo = app.geometry();
+        }
+    }
     if let Some(modal) = &app.modal {
         let lines: Vec<String> =
             match modal {
                 Modal::Help => [
-                    "Prefix: Ctrl+B (release, then next key)",
-                    "c new Tab   n/p next/previous   1–9 jump",
-                    "w Spaces   g Goto (/ search, arrows/j/k, Enter)",
-                    "N new Space   X close Tab   D close Space",
-                    "Enter new shell in ended Tab   q detach",
-                    "P arm ONE literal paste; normal paste awaits File Ingest",
+                    "Ctrl+B prefix; mouse selects Spaces/terminals/Tabs",
+                    "c new Tab   N new Space (shell and name automatic)",
+                    "n/p next/previous Tab   1–9 jump",
+                    "w Spaces picker   g Goto (/ search)",
+                    "r rename Space   , rename Tab (or right-click)",
+                    "X close Tab   D close Space (confirmed)",
+                    "Enter explicitly reopens ended Tab   q detach",
+                    "P arm ONE literal paste; File Ingest is pending",
                     "Esc closes dialogs; Ctrl+B Ctrl+B sends Ctrl+B",
-                    "History/copy, rename, agent Attention are not built yet",
+                    "Agent recognition/Attention and history/copy pending",
                 ]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-                Modal::Name(f) => vec![
-                    "New Space — name (Enter, Esc cancels)".into(),
-                    field_window(f, app.width).0,
-                ],
-                Modal::Directory(name, f) => vec![
-                    format!("New Space {name} — remote absolute directory"),
-                    field_window(f, app.width).0,
+                Modal::Rename(target, f) => vec![
+                    format!(
+                        "Rename {} — Enter saves; Esc cancels",
+                        match target {
+                            RenameTarget::Space(_) => "Space",
+                            RenameTarget::Tab(_) => "Tab",
+                        }
+                    ),
+                    field_window(f, body.width).0,
                 ],
                 Modal::ConfirmTab(_, name) => vec![
                     format!("Close Tab {name}?"),
-                    "This terminates its server-owned work. y confirms; n/Esc cancels.".into(),
+                    "Terminates its work. y confirms; n/Esc cancels.".into(),
                 ],
                 Modal::ConfirmSpace(_, name) => vec![
                     format!("Close Space {name}?"),
-                    "This terminates ALL its Tabs. y confirms; n/Esc cancels.".into(),
+                    "Terminates ALL its Tabs. y confirms; n/Esc cancels.".into(),
                 ],
                 Modal::Picker {
                     spaces,
@@ -173,7 +222,7 @@ pub fn render(app: &App, host: &str, view: Option<&ViewSnapshot>) -> Vec<u8> {
                     ..
                 } => {
                     let choices = filtered(choices, &filter.text);
-                    let count = geo.rows.saturating_sub(2) as usize;
+                    let count = body.height.saturating_sub(2) as usize;
                     let start = cursor.saturating_sub(count.saturating_sub(1));
                     let mut lines = vec![
                         if *spaces {
@@ -189,32 +238,31 @@ pub fn render(app: &App, host: &str, view: Option<&ViewSnapshot>) -> Vec<u8> {
                     lines
                 }
             };
-        for (i, text) in lines.iter().take(geo.rows as usize).enumerate() {
-            line(&mut out, 2 + i as u16, text, app.width);
+        for (i, text) in lines.iter().take(body.height as usize).enumerate() {
+            line(
+                &mut out,
+                Rect {
+                    y: body.y + i as u16,
+                    height: 1,
+                    ..body
+                },
+                text,
+                false,
+            );
         }
-        if let Modal::Name(f) | Modal::Directory(_, f) = modal {
-            let x = field_window(f, app.width).1;
-            out.extend_from_slice(format!("\x1b[4;{}H\x1b[?25h", x + 1).as_bytes());
+        if let Modal::Rename(_, f) = modal {
+            out.extend_from_slice(
+                format!(
+                    "\x1b[{};{}H\x1b[?25h",
+                    body.y + 2,
+                    body.x + field_window(f, body.width).1 as u16 + 1
+                )
+                .as_bytes(),
+            );
         }
     } else {
         if let Some(frame) = view.and_then(|v| v.frame.as_ref()) {
-            let clipped = crop(frame, geo.rows, geo.cols);
-            out.extend_from_slice(b"\x1b[3;1H");
-            out.extend_from_slice(&quosh_proto::frame_ansi(&clipped));
-            if app.live()
-                && frame.mode() & quosh_proto::MODE_CURSOR_VISIBLE != 0
-                && frame.cursor_row() < geo.rows
-                && frame.cursor_col() < geo.cols
-            {
-                out.extend_from_slice(
-                    format!(
-                        "\x1b[{};{}H\x1b[?25h",
-                        frame.cursor_row() + 3,
-                        frame.cursor_col() + 1
-                    )
-                    .as_bytes(),
-                );
-            }
+            terminal(&mut out, frame, body, app.live());
         }
         if let Some(tab) = app.tab()
             && let TerminalState::Ended(reason) = &tab.terminal
@@ -227,54 +275,68 @@ pub fn render(app: &App, host: &str, view: Option<&ViewSnapshot>) -> Vec<u8> {
                 EndReason::Exited(code) => format!("Shell ended with status {code}"),
                 EndReason::LaunchFailed(error) => format!("Shell launch failed: {error}"),
             };
-            line(&mut out, 2, &reason, app.width);
+            line(&mut out, Rect { height: 1, ..body }, &reason, false);
             line(
                 &mut out,
-                3,
-                "Ctrl+B Enter explicitly opens a NEW shell in the saved directory",
-                app.width,
+                Rect {
+                    y: body.y + 1,
+                    height: 1,
+                    ..body
+                },
+                "Ctrl+B Enter explicitly opens a NEW shell",
+                false,
             );
         } else if view.is_none() {
             line(
                 &mut out,
-                2,
-                if app.spaces.is_empty() {
-                    "Ctrl+B N creates a Space. No shell starts automatically."
-                } else if app.selected.is_none() {
-                    "Empty Space — Ctrl+B c opens a shell"
+                Rect { height: 1, ..body },
+                if app.selected.is_none() {
+                    "Click + to open a shell"
                 } else {
                     "Connecting to selected terminal…"
                 },
-                app.width,
+                false,
             );
         }
     }
-    let footer = if !app.notice.is_empty() {
-        app.notice.clone()
-    } else if app.prefix {
-        "Prefix: ? help | q detach".into()
+    let status = if app.prefix {
+        "Prefix: ? help, q detach".into()
     } else if app.busy {
-        "Control operation pending; Ctrl+B q still detaches".into()
-    } else if matches!(app.modal, Some(Modal::Name(_) | Modal::Directory(..))) {
-        "Field: Enter confirms | Esc cancels | arrows/Home/End edit".into()
-    } else if app
-        .tab()
-        .is_some_and(|t| matches!(t.terminal, TerminalState::Ended(_)))
-    {
-        "Ended — Ctrl+B Enter opens a NEW shell | Ctrl+B q detaches".into()
+        "Control pending".into()
     } else {
-        format!(
-            "Ctrl+B ? help | q detach{}",
-            view.map_or(String::new(), |v| format!(" | {:?}", v.status))
-        )
+        view.map_or(format!("Sheepdog {host}"), |v| format!("{:?}", v.status))
     };
-    // Preserve the terminal cursor while painting local chrome.
     out.extend_from_slice(b"\x1b7");
-    line(&mut out, app.height - 1, &footer, app.width);
+    if layout.sidebar > 0 {
+        line(
+            &mut out,
+            Rect {
+                x: 0,
+                y: app.height - 1,
+                width: layout.sidebar - 1,
+                height: 1,
+            },
+            &status,
+            false,
+        );
+    }
+    // Notices are explicit temporary overlays, not a permanent terminal footer.
+    if !app.notice.is_empty() {
+        line(
+            &mut out,
+            Rect {
+                x: body.x,
+                y: app.height - 1,
+                width: body.width,
+                height: 1,
+            },
+            &app.notice,
+            false,
+        );
+    }
     out.extend_from_slice(b"\x1b8\x1b[?7h\x1b[?2026l");
     out
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,9 +348,7 @@ mod tests {
     fn fields_scroll_to_keep_the_grapheme_cursor_visible() {
         let mut f = Field::default();
         f.insert("/long/path/界界");
-        let (text, x) = field_window(&f, 6);
-        assert_eq!(text, "/界界");
-        assert_eq!(x, 5);
+        assert_eq!(field_window(&f, 6), ("/界界".into(), 5));
     }
     #[test]
     fn chrome_clips_whole_emoji_graphemes() {
@@ -302,11 +362,11 @@ mod tests {
         f.overflow_mut().insert(5, "overflow".into());
         let c = crop(&f, 2, 2);
         assert_eq!(c.cell_content(1, 1), "overflow");
-        assert_eq!(c.cells().len(), 2 * 2 * 12);
+        assert_eq!(c.cells().len(), 48);
     }
     #[test]
     fn crop_never_prints_half_a_wide_character_at_right_edge() {
-        let mut cells = vec![0; 2 * 12];
+        let mut cells = vec![0; 24];
         cells[1] = 3 << 3;
         cells[8..11].copy_from_slice("界".as_bytes());
         cells[13] = 2;
